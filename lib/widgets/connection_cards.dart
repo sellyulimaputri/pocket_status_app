@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../services/bluetooth_service.dart';
+
 class ConnectionCards extends StatelessWidget {
   final VoidCallback onDeviceTap;
   final VoidCallback onWifiTap;
@@ -12,22 +14,33 @@ class ConnectionCards extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        _buildActionCard(
-          icon: Icons.charging_station_outlined,
-          title: "Perangkat Terhubung",
-          subtitle: "Sambungkan ke perangkat anda",
-          onTap: onDeviceTap,
-        ),
-        const SizedBox(height: 12),
-        _buildActionCard(
-          icon: Icons.wifi,
-          title: "Wi-Fi",
-          subtitle: "Konfigurasi Wi-Fi perangkat",
-          onTap: onWifiTap,
-        ),
-      ],
+    final service = BleService.instance;
+
+    return ListenableBuilder(
+      listenable: service,
+      builder: (context, _) {
+        final device = service.connectedDevice;
+
+        return Column(
+          children: [
+            _buildActionCard(
+              icon: Icons.charging_station_outlined,
+              title: "Perangkat Terhubung",
+              subtitle: device == null
+                  ? "Pairing Bluetooth & koneksi perangkat"
+                  : "Terhubung ke ${service.deviceName(device)}",
+              onTap: onDeviceTap,
+            ),
+            const SizedBox(height: 12),
+            _buildActionCard(
+              icon: Icons.wifi,
+              title: "Wi-Fi",
+              subtitle: "Konfigurasi Wi-Fi perangkat",
+              onTap: onWifiTap,
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -47,7 +60,7 @@ class ConnectionCards extends StatelessWidget {
           borderRadius: BorderRadius.circular(16),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.03),
+              color: Colors.black.withValues(alpha: 0.03),
               blurRadius: 8,
               offset: const Offset(0, 2),
             )
