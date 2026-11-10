@@ -23,6 +23,7 @@ class PocketStatusApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       title: 'Pocket Status',
       theme: ThemeData(
+        useMaterial3: true,
         scaffoldBackgroundColor: const Color(0xFFF7F8FA),
         fontFamily: 'Sans-Serif',
       ),
@@ -77,7 +78,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
           onRefresh: loadAllData,
           child: SingleChildScrollView(
             physics: const AlwaysScrollableScrollPhysics(),
-            padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 12.0),
+            padding: const EdgeInsets.symmetric(
+              horizontal: 20.0,
+              vertical: 12.0,
+            ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -101,9 +105,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 // Konfigurasi Template Header
                 Row(
                   children: const [
-                    Icon(Icons.dashboard_customize_outlined, size: 20, color: Colors.black87),
+                    Icon(
+                      Icons.dashboard_customize_outlined,
+                      size: 20,
+                      color: Colors.black87,
+                    ),
                     SizedBox(width: 8),
-                    Text("Konfigurasi Template", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                    Text(
+                      "Konfigurasi Template",
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 16),
@@ -142,7 +156,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     subtitle: "Klasemen 3 Besar Liga Pilihan",
                     displayWidget: buildTemplate5(sportData),
                   ),
-                ]
+                ],
               ],
             ),
           ),
