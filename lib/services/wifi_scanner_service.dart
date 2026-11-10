@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
@@ -22,8 +23,10 @@ class WifiScannerService extends ChangeNotifier {
   StreamSubscription<List<int>>? _statusSubscription;
   StreamSubscription<BluetoothConnectionState>? _connectionSubscription;
   Timer? _scanTimeout;
+  Timer? _configurationTimeout;
   final Set<String> _receivedResultKeys = <String>{};
   bool _scanCommandInFlight = false;
+  bool _configurationInFlight = false;
   bool _disposed = false;
 
   WifiScannerService({BleService? bleService})
@@ -31,6 +34,7 @@ class WifiScannerService extends ChangeNotifier {
 
   WifiScanState get state => _state;
   bool get isReady => _command != null && _data != null && _status != null;
+  bool get isConfiguring => _configurationInFlight;
 
   Future<void> connectToCurrentDevice() async {
     final device = _bleService.connectedDevice;
@@ -149,6 +153,52 @@ class WifiScannerService extends ChangeNotifier {
 
   Future<void> requestStatus() => _sendCommand('GET_STATUS');
 
+  Future<void> requestWifiConfig() => _sendCommand('GET_WIFI_CONFIG');
+
+  Future<void> clearWifiConfiguration() => _sendCommand('CLEAR_WIFI');
+
+  Future<void> configureWifi({
+    required String ssid,
+    required String password,
+  }) async {
+    final trimmedSsid = ssid.trim();
+    if (trimmedSsid.isEmpty) {
+      _setError('Pilih jaringan Wi-Fi terlebih dahulu.');
+      return;
+    }
+    if (_configurationInFlight) return;
+    if (!isReady) await connectToCurrentDevice();
+    final command = _command;
+    if (command == null) return;
+
+    _configurationInFlight = true;
+    _configurationTimeout?.cancel();
+    _configurationTimeout = Timer(const Duration(seconds: 30), () {
+      if (_configurationInFlight) {
+        _configurationInFlight = false;
+        _setError('Perangkat tidak merespons konfigurasi Wi-Fi.');
+      }
+    });
+    _notify();
+
+    try {
+      final payload = jsonEncode({
+        'command': 'SET_WIFI',
+        'ssid': trimmedSsid,
+        'password': password,
+      });
+      debugPrint('[BLE TX] SET_WIFI for selected SSID');
+      await command.write(
+        utf8.encode(payload),
+        withoutResponse: !command.properties.write,
+      );
+    } catch (error) {
+      _configurationTimeout?.cancel();
+      _configurationInFlight = false;
+      _setError('Gagal menyimpan konfigurasi Wi-Fi: ${_friendlyError(error)}');
+    }
+  }
+
   Future<void> _sendCommand(String commandText) async {
     final command = _command;
     if (command == null) {
@@ -235,6 +285,11 @@ class WifiScannerService extends ChangeNotifier {
             : _errorMessageForCode(code);
         debugPrint('[BLE RX] error: ${code ?? 'unavailable'} - $message');
         _scanTimeout?.cancel();
+        if (code == 'wifi_config_save_failed' ||
+            code == 'invalid_wifi_config') {
+          _configurationTimeout?.cancel();
+          _configurationInFlight = false;
+        }
         _setError(
           code == 'mtu_too_small'
               ? 'Payload Wi-Fi terlalu besar untuk MTU BLE perangkat '
@@ -244,6 +299,14 @@ class WifiScannerService extends ChangeNotifier {
         );
         break;
       case 'status':
+      case 'wifi_status':
+      case 'wifi_config':
+      case 'wifi_config_saved':
+      case 'wifi_config_cleared':
+        if (eventName != 'status') {
+          _configurationTimeout?.cancel();
+          _configurationInFlight = false;
+        }
         final status = BleDeviceStatus.fromJson(event);
         var phase = _state.phase;
         if (status.state == 'scanning' && phase == WifiScanPhase.idle) {
@@ -257,6 +320,8 @@ class WifiScannerService extends ChangeNotifier {
 
   void _handleDisconnected() {
     _scanTimeout?.cancel();
+    _configurationTimeout?.cancel();
+    _configurationInFlight = false;
     _command = null;
     _data = null;
     _status = null;
@@ -270,6 +335,7 @@ class WifiScannerService extends ChangeNotifier {
 
   Future<void> disposeScanner() async {
     _scanTimeout?.cancel();
+    _configurationTimeout?.cancel();
     await _cancelSubscriptions();
     _command = null;
     _data = null;
@@ -324,6 +390,10 @@ class WifiScannerService extends ChangeNotifier {
       'scan_start_failed' => 'PocketStatus gagal memulai scan Wi-Fi.',
       'scan_failed' => 'PocketStatus gagal menyelesaikan scan Wi-Fi.',
       'unknown_command' => 'Perintah BLE belum didukung firmware.',
+      'invalid_wifi_config' =>
+        'SSID atau format konfigurasi Wi-Fi tidak valid.',
+      'wifi_config_save_failed' =>
+        'Konfigurasi Wi-Fi gagal disimpan perangkat.',
       null => 'Firmware mengembalikan error umum (kode tidak tersedia).',
       _ => 'Firmware mengembalikan error: $code',
     };
@@ -346,6 +416,7 @@ class WifiScannerService extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _scanTimeout?.cancel();
+    _configurationTimeout?.cancel();
     unawaited(_cancelSubscriptions());
     super.dispose();
   }

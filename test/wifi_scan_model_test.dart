@@ -36,15 +36,21 @@ void main() {
 
   test('status accepts optional and extra fields', () {
     final status = BleDeviceStatus.fromJson({
-      'event': 'status',
-      'state': 'idle',
-      'wifi_connected': false,
+      'event': 'wifi_status',
+      'state': 'wifi_connected',
+      'configured': true,
+      'connecting': false,
+      'connected': true,
+      'ssid': 'Pocket WiFi',
       'scan_id': 7,
       'extra': 'ignored',
     });
 
-    expect(status.state, 'idle');
-    expect(status.wifiConnected, isFalse);
+    expect(status.state, 'wifi_connected');
+    expect(status.wifiConnected, isTrue);
+    expect(status.wifiConfigured, isTrue);
+    expect(status.wifiConnecting, isFalse);
+    expect(status.ssid, 'Pocket WiFi');
     expect(status.scanId, 7);
   });
 }

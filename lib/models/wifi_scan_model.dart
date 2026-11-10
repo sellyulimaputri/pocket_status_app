@@ -38,19 +38,30 @@ class BleDeviceStatus {
     required this.state,
     required this.wifiConnected,
     required this.scanId,
+    this.wifiConfigured,
+    this.wifiConnecting,
+    this.ssid,
   });
 
   final String state;
   final bool? wifiConnected;
   final int? scanId;
+  final bool? wifiConfigured;
+  final bool? wifiConnecting;
+  final String? ssid;
 
   factory BleDeviceStatus.fromJson(Map<String, dynamic> json) {
     return BleDeviceStatus(
       state: _stringValue(json['state'], fallback: 'unknown'),
-      wifiConnected: json['wifi_connected'] is bool
-          ? json['wifi_connected'] as bool
-          : null,
+      wifiConnected: _nullableBool(json['wifi_connected'] ?? json['connected']),
       scanId: _nullableIntValue(json['scan_id']),
+      wifiConfigured: _nullableBool(
+        json['wifi_configured'] ?? json['configured'],
+      ),
+      wifiConnecting: _nullableBool(
+        json['wifi_connecting'] ?? json['connecting'],
+      ),
+      ssid: _nullableString(json['wifi_ssid'] ?? json['ssid']),
     );
   }
 }
@@ -114,4 +125,12 @@ int _intValue(Object? value) {
 int? _nullableIntValue(Object? value) {
   if (value is int) return value;
   return value == null ? null : int.tryParse('$value');
+}
+
+bool? _nullableBool(Object? value) {
+  return value is bool ? value : null;
+}
+
+String? _nullableString(Object? value) {
+  return value is String && value.isNotEmpty ? value : null;
 }

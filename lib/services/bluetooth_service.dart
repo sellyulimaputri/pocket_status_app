@@ -77,9 +77,14 @@ class BleService extends ChangeNotifier {
 
       _subscriptions.add(
         FlutterBluePlus.events.onConnectionStateChanged.listen((event) {
+          debugPrint(
+            '[BLE] Connection state ${event.device.remoteId}: '
+            '${event.connectionState}',
+          );
           if (_connectedDevice != null && event.device == _connectedDevice) {
             if (event.connectionState ==
                 BluetoothConnectionState.disconnected) {
+              debugPrint('[BLE] Disconnected event received');
               _connectedDevice = null;
               notifyListeners();
             }
@@ -172,6 +177,7 @@ class BleService extends ChangeNotifier {
         return;
       }
 
+      await stopScan();
       _scanResults = [];
       notifyListeners();
 
@@ -222,14 +228,19 @@ class BleService extends ChangeNotifier {
       await FlutterBluePlus.stopScan();
 
       final previousDevice = _connectedDevice;
-      if (previousDevice != null && previousDevice != device) {
+      if (previousDevice != null) {
         try {
+          debugPrint(
+            '[BLE] Clearing previous connection: ${previousDevice.remoteId}',
+          );
           await previousDevice.disconnect();
-        } catch (_) {
-          // Abaikan kegagalan disconnect perangkat sebelumnya.
+        } catch (error) {
+          debugPrint('[BLE] Previous disconnect ignored: $error');
         }
+        _connectedDevice = null;
       }
 
+      debugPrint('[BLE] Connecting to ${device.remoteId}');
       await device.connect(
         license: License.nonprofit,
         timeout: const Duration(seconds: 25),
@@ -261,12 +272,17 @@ class BleService extends ChangeNotifier {
 
   Future<void> disconnect() async {
     final device = _connectedDevice;
-    if (device == null) return;
+    if (device == null) {
+      debugPrint('[BLE] Disconnect skipped: no connected device');
+      return;
+    }
 
+    debugPrint('[BLE] Disconnect requested: ${device.remoteId}');
     try {
       await device.disconnect();
-    } catch (_) {
-      // Tetap reset state lokal meskipun perangkat sudah tidak terjangkau.
+      debugPrint('[BLE] Disconnect call completed: ${device.remoteId}');
+    } catch (error) {
+      debugPrint('[BLE] Disconnect failed: $error');
     }
 
     _connectedDevice = null;
@@ -280,19 +296,18 @@ class BleService extends ChangeNotifier {
       final statuses = await [
         Permission.bluetoothScan,
         Permission.bluetoothConnect,
-        Permission.locationWhenInUse,
       ].request();
 
       final scanGranted =
           statuses[Permission.bluetoothScan]?.isGranted ?? false;
       final connectGranted =
           statuses[Permission.bluetoothConnect]?.isGranted ?? false;
-      final locationGranted =
-          statuses[Permission.locationWhenInUse]?.isGranted ?? false;
 
-      // Android 12+: butuh izin Scan + Connect.
-      // Android 11 ke bawah: butuh izin lokasi.
-      return (scanGranted && connectGranted) || locationGranted;
+      if (scanGranted && connectGranted) return true;
+
+      // Android 11 dan versi lama dapat membutuhkan lokasi untuk BLE scan.
+      final locationStatus = await Permission.locationWhenInUse.request();
+      return locationStatus.isGranted;
     }
 
     if (defaultTargetPlatform == TargetPlatform.iOS) {

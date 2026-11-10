@@ -14,18 +14,28 @@ class WifiDialog extends StatefulWidget {
 class _WifiDialogState extends State<WifiDialog> {
   static const _accent = Color(0xFF2F80ED);
   final _scanner = WifiScannerService();
+  final _passwordController = TextEditingController();
   String? _selectedSsid;
+  bool _obscurePassword = true;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _scanner.connectToCurrentDevice();
+      _initializeScanner();
     });
+  }
+
+  Future<void> _initializeScanner() async {
+    await _scanner.connectToCurrentDevice();
+    if (mounted && _scanner.isReady) {
+      await _scanner.requestWifiConfig();
+    }
   }
 
   @override
   void dispose() {
+    _passwordController.dispose();
     _scanner.disposeScanner();
     _scanner.dispose();
     super.dispose();
@@ -56,6 +66,10 @@ class _WifiDialogState extends State<WifiDialog> {
                   const SizedBox(height: 14),
                   if (state.errorMessage != null)
                     _buildError(state.errorMessage!),
+                  _buildWifiStatus(state, isConnected),
+                  const SizedBox(height: 10),
+                  _buildPasswordField(isConnected),
+                  const SizedBox(height: 10),
                   _buildScanStatus(state),
                   const SizedBox(height: 10),
                   Expanded(child: _buildNetworkList(state)),
@@ -177,6 +191,87 @@ class _WifiDialogState extends State<WifiDialog> {
     );
   }
 
+  Widget _buildWifiStatus(WifiScanState state, bool isConnected) {
+    final status = state.deviceStatus;
+    final label = !isConnected
+        ? 'BLE belum terhubung'
+        : status?.wifiConnecting == true
+        ? 'Connecting to Wi-Fi...'
+        : status?.wifiConnected == true
+        ? 'Connected: ${status?.ssid ?? 'Wi-Fi'}'
+        : status?.wifiConfigured == true
+        ? 'Disconnected: ${status?.ssid ?? 'saved network'}'
+        : 'Not configured';
+    final color = status?.wifiConnected == true
+        ? Colors.green.shade700
+        : Colors.grey.shade700;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade50,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            status?.wifiConnected == true ? Icons.wifi : Icons.wifi_off,
+            size: 18,
+            color: color,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 12, color: color),
+            ),
+          ),
+          IconButton(
+            onPressed: isConnected && !_scanner.isConfiguring
+                ? _scanner.requestWifiConfig
+                : null,
+            tooltip: 'Muat ulang konfigurasi Wi-Fi',
+            icon: const Icon(Icons.sync, size: 18),
+            visualDensity: VisualDensity.compact,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPasswordField(bool isConnected) {
+    return TextField(
+      controller: _passwordController,
+      enabled: isConnected && !_scanner.isConfiguring,
+      obscureText: _obscurePassword,
+      decoration: InputDecoration(
+        labelText: 'Password Wi-Fi',
+        hintText: _selectedSsid == null
+            ? 'Pilih SSID terlebih dahulu'
+            : 'Kosongkan untuk jaringan terbuka',
+        prefixIcon: const Icon(Icons.lock_outline, size: 19),
+        suffixIcon: IconButton(
+          onPressed: isConnected
+              ? () => setState(() => _obscurePassword = !_obscurePassword)
+              : null,
+          tooltip: _obscurePassword
+              ? 'Tampilkan password'
+              : 'Sembunyikan password',
+          icon: Icon(
+            _obscurePassword ? Icons.visibility : Icons.visibility_off,
+            size: 19,
+          ),
+        ),
+        isDense: true,
+        border: const OutlineInputBorder(),
+      ),
+    );
+  }
+
   Widget _buildNetworkList(WifiScanState state) {
     if (state.networks.isEmpty && state.phase != WifiScanPhase.scanning) {
       return Center(
@@ -261,28 +356,104 @@ class _WifiDialogState extends State<WifiDialog> {
     );
   }
 
+  Future<void> _saveWifi() async {
+    final ssid = _selectedSsid;
+    if (ssid == null || ssid.trim().isEmpty) {
+      _showMessage('Pilih jaringan Wi-Fi terlebih dahulu.');
+      return;
+    }
+    await _scanner.configureWifi(
+      ssid: ssid,
+      password: _passwordController.text,
+    );
+  }
+
+  Future<void> _clearWifi() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Hapus konfigurasi Wi-Fi?'),
+        content: const Text(
+          'SSID dan password yang tersimpan di PocketStatus akan dihapus.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Batal'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Hapus'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) await _scanner.clearWifiConfiguration();
+  }
+
+  void _showMessage(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
+    );
+  }
+
   Widget _buildActions(WifiScanState state, bool isConnected) {
     final scanning = state.phase == WifiScanPhase.scanning;
-    return Row(
+    return Column(
       children: [
-        Expanded(
-          child: FilledButton.icon(
-            onPressed: !isConnected || scanning ? null : _scanner.scanWifi,
-            icon: Icon(scanning ? Icons.hourglass_top : Icons.refresh),
-            label: Text(scanning ? 'Scanning...' : 'Scan Wi-Fi'),
-            style: FilledButton.styleFrom(backgroundColor: _accent),
-          ),
+        Row(
+          children: [
+            Expanded(
+              child: FilledButton.icon(
+                onPressed: !isConnected || scanning || _scanner.isConfiguring
+                    ? null
+                    : _scanner.scanWifi,
+                icon: Icon(scanning ? Icons.hourglass_top : Icons.refresh),
+                label: Text(scanning ? 'Scanning...' : 'Scan Wi-Fi'),
+                style: FilledButton.styleFrom(backgroundColor: _accent),
+              ),
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              onPressed: isConnected && !_scanner.isConfiguring
+                  ? _scanner.requestStatus
+                  : null,
+              tooltip: 'Minta status perangkat',
+              icon: const Icon(Icons.sync),
+            ),
+            IconButton(
+              onPressed: () => Navigator.pop(context),
+              tooltip: 'Tutup',
+              icon: const Icon(Icons.close),
+            ),
+          ],
         ),
-        const SizedBox(width: 8),
-        IconButton(
-          onPressed: isConnected ? _scanner.requestStatus : null,
-          tooltip: 'Minta status perangkat',
-          icon: const Icon(Icons.sync),
-        ),
-        IconButton(
-          onPressed: () => Navigator.pop(context),
-          tooltip: 'Tutup',
-          icon: const Icon(Icons.close),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: FilledButton.icon(
+                onPressed: !isConnected || _selectedSsid == null || scanning
+                    ? null
+                    : _saveWifi,
+                icon: Icon(
+                  _scanner.isConfiguring
+                      ? Icons.hourglass_top
+                      : Icons.wifi_protected_setup,
+                ),
+                label: Text(
+                  _scanner.isConfiguring ? 'Connecting...' : 'Save & Connect',
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            OutlinedButton(
+              onPressed: !isConnected || _scanner.isConfiguring
+                  ? null
+                  : _clearWifi,
+              child: const Text('Clear'),
+            ),
+          ],
         ),
       ],
     );
