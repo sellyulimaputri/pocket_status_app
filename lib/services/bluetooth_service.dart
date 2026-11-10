@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -15,6 +17,32 @@ class BleService extends ChangeNotifier {
   bool _isScanning = false;
   bool _isConnecting = false;
   bool _initStarted = false;
+
+  // --- VARIABEL PENAMPUNG DATA ESP32 ---
+  bool _isEspWifiConnected = false;
+  String _espWifiSsid = "";
+  String _espWifiIp = "";
+  bool _hasEspStatus = false; // true setelah ESP membalas status minimal sekali
+  List<Map<String, dynamic>> _scannedWifiList = [];
+  bool _isEspScanningWifi = false;
+
+  // Getters agar bisa dibaca oleh UI
+  bool get isEspWifiConnected => _isEspWifiConnected;
+  String get espWifiSsid => _espWifiSsid;
+  String get espWifiIp => _espWifiIp;
+  bool get hasEspStatus => _hasEspStatus;
+  List<Map<String, dynamic>> get scannedWifiList => _scannedWifiList;
+  bool get isEspScanningWifi => _isEspScanningWifi;
+
+  // --- KONFIGURASI UUID ESP32 ---
+  final String _serviceUuid = "7b5e0001-4f4f-4f4f-8b5a-000000000001";
+  final String _cmdCharacteristicUuid = "7b5e0002-4f4f-4f4f-8b5a-000000000001";
+  final String _dataCharacteristicUuid = "7b5e0003-4f4f-4f4f-8b5a-000000000001";
+
+  BluetoothCharacteristic? _cmdCharacteristic;
+  BluetoothCharacteristic? _dataCharacteristic;
+  StreamSubscription<List<int>>? _dataSubscription;
+  String _rxBuffer = ""; // penampung JSON yang datang terpotong-potong
   String? _errorMessage;
 
   BluetoothAdapterState get adapterState => _adapterState;
@@ -24,6 +52,22 @@ class BleService extends ChangeNotifier {
   bool get isScanning => _isScanning;
   bool get isConnecting => _isConnecting;
   String? get errorMessage => _errorMessage;
+
+  /// Bersihkan semua data ESP32 + listener (dipanggil saat BLE putus).
+  void _resetEspState() {
+    _dataSubscription?.cancel();
+    _dataSubscription = null;
+    _cmdCharacteristic = null;
+    _dataCharacteristic = null;
+    _rxBuffer = "";
+
+    _hasEspStatus = false;
+    _isEspWifiConnected = false;
+    _espWifiSsid = "";
+    _espWifiIp = "";
+    _scannedWifiList = [];
+    _isEspScanningWifi = false;
+  }
 
   /// Inisialisasi plugin dilakukan saat pertama kali dibutuhkan supaya
   /// aplikasi tetap aman berjalan di platform yang tidak mendukung BLE
@@ -62,6 +106,7 @@ class BleService extends ChangeNotifier {
         if (_connectedDevice != null && event.device == _connectedDevice) {
           if (event.connectionState == BluetoothConnectionState.disconnected) {
             _connectedDevice = null;
+            _resetEspState();
             notifyListeners();
           }
         }
@@ -197,12 +242,14 @@ class BleService extends ChangeNotifier {
         } catch (_) {
           // Abaikan kegagalan disconnect perangkat sebelumnya.
         }
+        _resetEspState();
       }
 
       await device.connect(
         license: License.nonprofit,
         timeout: const Duration(seconds: 25),
-        mtu: null,
+        // MTU besar supaya JSON daftar Wi-Fi dari ESP tidak terpotong.
+        mtu: 512,
       );
 
       // Android: munculkan dialog pairing sistem (PIN/konfirmasi).
@@ -216,6 +263,43 @@ class BleService extends ChangeNotifier {
       }
 
       _connectedDevice = device;
+
+      // --- CARI SERVICE & SETUP NOTIFY ---
+      try {
+        final services = await device.discoverServices();
+        for (final service in services) {
+          if (service.uuid.toString().toLowerCase() !=
+              _serviceUuid.toLowerCase()) {
+            continue;
+          }
+
+          for (final char in service.characteristics) {
+            final cUuid = char.uuid.toString().toLowerCase();
+
+            if (cUuid == _cmdCharacteristicUuid.toLowerCase()) {
+              _cmdCharacteristic = char;
+            } else if (cUuid == _dataCharacteristicUuid.toLowerCase()) {
+              _dataCharacteristic = char;
+
+              // Batalkan listener lama supaya balasan tidak diproses dobel.
+              await _dataSubscription?.cancel();
+              _rxBuffer = "";
+
+              // Pasang listener dulu, baru aktifkan notify.
+              _dataSubscription = char.onValueReceived.listen(_onDataReceived);
+              await char.setNotifyValue(true);
+            }
+          }
+        }
+
+        if (_cmdCharacteristic == null || _dataCharacteristic == null) {
+          debugPrint('Characteristic ESP32 tidak ditemukan. Cek UUID.');
+        }
+      } catch (e) {
+        debugPrint("Gagal setup characteristics: $e");
+      }
+      // ------------------------------------
+
       return device;
     } catch (e) {
       _errorMessage =
@@ -223,6 +307,64 @@ class BleService extends ChangeNotifier {
       return null;
     } finally {
       _isConnecting = false;
+      notifyListeners();
+    }
+  }
+
+  /// Memproses data notify dari ESP32. JSON bisa datang terpotong-potong,
+  /// jadi potongan digabung dulu sampai bisa di-decode.
+  void _onDataReceived(List<int> value) {
+    if (value.isEmpty) return;
+
+    final chunk = utf8.decode(value, allowMalformed: true);
+
+    // Pesan baru selalu diawali '{' -> buang sisa buffer yang rusak.
+    if (chunk.trimLeft().startsWith('{')) {
+      _rxBuffer = chunk;
+    } else {
+      _rxBuffer += chunk;
+    }
+
+    if (_rxBuffer.length > 8192) {
+      _rxBuffer = "";
+      return;
+    }
+
+    final Map<String, dynamic> data;
+    try {
+      final decoded = jsonDecode(_rxBuffer);
+      if (decoded is! Map<String, dynamic>) return;
+      data = decoded;
+    } catch (_) {
+      // Belum lengkap, tunggu potongan berikutnya.
+      return;
+    }
+
+    debugPrint("Balasan ESP32: $_rxBuffer");
+    _rxBuffer = "";
+
+    final event = data['event'];
+
+    if (event == 'status') {
+      // Contoh: {"event":"status","status":"connected","ssid":"Biznet","ip":"192.168.1.12"}
+      _isEspWifiConnected = data['status'] == 'connected';
+      _espWifiSsid = (data['ssid'] ?? "").toString();
+      _espWifiIp = (data['ip'] ?? "").toString();
+      _hasEspStatus = true;
+      notifyListeners();
+    } else if (event == 'scan_start') {
+      _isEspScanningWifi = true;
+      notifyListeners();
+    } else if (event == 'scan_result') {
+      // Contoh: {"event":"scan_result","networks":[{"ssid":"Kosan","rssi":-50,"secure":true}]}
+      final networks = data['networks'];
+      if (networks is List) {
+        _scannedWifiList = networks
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+      }
+      _isEspScanningWifi = false;
       notifyListeners();
     }
   }
@@ -238,6 +380,7 @@ class BleService extends ChangeNotifier {
     }
 
     _connectedDevice = null;
+    _resetEspState();
     notifyListeners();
   }
 
@@ -277,5 +420,55 @@ class BleService extends ChangeNotifier {
       return 'Fitur ini hanya tersedia di Android.';
     }
     return text.replaceFirst('FlutterBluePlusException: ', '');
+  }
+
+  /// Fungsi untuk mengirim perintah JSON ke ESP32
+  Future<bool> sendJsonCommand(String jsonString) async {
+    if (_cmdCharacteristic == null) {
+      _errorMessage = "Koneksi ke perangkat belum sempurna.";
+      notifyListeners();
+      return false;
+    }
+
+    try {
+      // Ubah teks JSON menjadi byte (UTF-8) sebelum dikirim
+      final bytes = utf8.encode(jsonString);
+      // Kirim ke Characteristic 0002 (Write)
+      await _cmdCharacteristic!.write(bytes, withoutResponse: false);
+      return true;
+    } catch (e) {
+      _errorMessage = 'Gagal mengirim perintah: ${_friendlyError(e)}';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  /// Meminta ESP32 mengirimkan status koneksinya saat ini
+  Future<void> checkEspStatus() async {
+    await sendJsonCommand('{"action": "get_status"}');
+  }
+
+  /// Menyuruh ESP32 memindai jaringan Wi-Fi di sekitar
+  Future<void> scanEspWifi() async {
+    _isEspScanningWifi = true;
+    _scannedWifiList = []; // Bersihkan daftar lama
+    notifyListeners();
+
+    final ok = await sendJsonCommand('{"action": "scan_wifi"}');
+    if (!ok) {
+      _isEspScanningWifi = false;
+      notifyListeners();
+    }
+  }
+
+  /// Mengirim kredensial Wi-Fi baru ke ESP32
+  Future<void> connectEspToWifi(String ssid, String password) async {
+    // jsonEncode otomatis meng-escape karakter spesial (", \, dll).
+    final payload = jsonEncode({
+      "action": "set_wifi",
+      "ssid": ssid,
+      "pass": password,
+    });
+    await sendJsonCommand(payload);
   }
 }
