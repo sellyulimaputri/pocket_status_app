@@ -205,6 +205,7 @@ class _BluetoothPairingDialogState extends State<BluetoothPairingDialog> {
   }
 
   Widget _buildDeviceList(List<ScanResult> results) {
+    results = results.where(_service.isPocketStatusDevice).toList();
     if (!_service.isBluetoothOn) {
       return _buildEmptyState(
         icon: Icons.bluetooth_disabled,
@@ -354,8 +355,7 @@ class _BluetoothPairingDialogState extends State<BluetoothPairingDialog> {
             const SizedBox(width: 8),
             if (isConnected)
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                 decoration: BoxDecoration(
                   color: Colors.green.shade50,
                   borderRadius: BorderRadius.circular(20),

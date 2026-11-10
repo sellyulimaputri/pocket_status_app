@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -8,6 +10,10 @@ class BleService extends ChangeNotifier {
   BleService._();
 
   static final BleService instance = BleService._();
+  static const targetDeviceName = 'PocketStatus Hafid';
+  static final pocketStatusServiceUuid = Guid(
+    '7b5e0001-4f4f-4f4f-8b5a-000000000001',
+  );
 
   BluetoothAdapterState _adapterState = BluetoothAdapterState.unknown;
   List<ScanResult> _scanResults = [];
@@ -16,6 +22,7 @@ class BleService extends ChangeNotifier {
   bool _isConnecting = false;
   bool _initStarted = false;
   String? _errorMessage;
+  final List<StreamSubscription<dynamic>> _subscriptions = [];
 
   BluetoothAdapterState get adapterState => _adapterState;
   bool get isBluetoothOn => _adapterState == BluetoothAdapterState.on;
@@ -39,33 +46,46 @@ class BleService extends ChangeNotifier {
     }
 
     try {
-      FlutterBluePlus.adapterState.listen((state) {
-        _adapterState = state;
-        if (state != BluetoothAdapterState.on) {
-          _scanResults = [];
-        }
-        notifyListeners();
-      });
-
-      FlutterBluePlus.isScanning.listen((scanning) {
-        _isScanning = scanning;
-        notifyListeners();
-      });
-
-      FlutterBluePlus.scanResults.listen((results) {
-        _scanResults = List<ScanResult>.from(results)
-          ..sort((a, b) => b.rssi.compareTo(a.rssi));
-        notifyListeners();
-      });
-
-      FlutterBluePlus.events.onConnectionStateChanged.listen((event) {
-        if (_connectedDevice != null && event.device == _connectedDevice) {
-          if (event.connectionState == BluetoothConnectionState.disconnected) {
-            _connectedDevice = null;
-            notifyListeners();
+      _subscriptions.add(
+        FlutterBluePlus.adapterState.listen((state) {
+          _adapterState = state;
+          if (state != BluetoothAdapterState.on) {
+            _scanResults = [];
           }
-        }
-      });
+          notifyListeners();
+        }),
+      );
+
+      _subscriptions.add(
+        FlutterBluePlus.isScanning.listen((scanning) {
+          _isScanning = scanning;
+          notifyListeners();
+        }),
+      );
+
+      _subscriptions.add(
+        FlutterBluePlus.scanResults.listen((results) {
+          _scanResults = List<ScanResult>.from(results)
+            ..sort((a, b) => b.rssi.compareTo(a.rssi));
+          if (results.any(isPocketStatusDevice)) {
+            unawaited(stopScan());
+            debugPrint('[BLE] Target device found; scan stopped');
+          }
+          notifyListeners();
+        }),
+      );
+
+      _subscriptions.add(
+        FlutterBluePlus.events.onConnectionStateChanged.listen((event) {
+          if (_connectedDevice != null && event.device == _connectedDevice) {
+            if (event.connectionState ==
+                BluetoothConnectionState.disconnected) {
+              _connectedDevice = null;
+              notifyListeners();
+            }
+          }
+        }),
+      );
 
       _initStarted = true;
       return true;
@@ -98,6 +118,17 @@ class BleService extends ChangeNotifier {
     if (advName.isNotEmpty) return advName;
 
     return 'Perangkat tanpa nama';
+  }
+
+  bool isPocketStatusDevice(ScanResult result) {
+    final advertisedName = result.advertisementData.advName.trim();
+    final platformName = result.device.platformName.trim();
+    final hasName =
+        advertisedName == targetDeviceName || platformName == targetDeviceName;
+    final hasService = result.advertisementData.serviceUuids.contains(
+      pocketStatusServiceUuid,
+    );
+    return hasName || hasService;
   }
 
   /// Minta izin Bluetooth lalu mulai memindai perangkat di sekitar.
@@ -216,6 +247,7 @@ class BleService extends ChangeNotifier {
       }
 
       _connectedDevice = device;
+      debugPrint('[BLE] Connected to ${deviceName(device)}');
       return device;
     } catch (e) {
       _errorMessage =
@@ -277,5 +309,14 @@ class BleService extends ChangeNotifier {
       return 'Fitur ini hanya tersedia di Android.';
     }
     return text.replaceFirst('FlutterBluePlusException: ', '');
+  }
+
+  @override
+  void dispose() {
+    for (final subscription in _subscriptions) {
+      unawaited(subscription.cancel());
+    }
+    _subscriptions.clear();
+    super.dispose();
   }
 }

@@ -26,8 +26,10 @@ class DeviceDialog extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    const Icon(Icons.charging_station_outlined,
-                        color: Colors.grey),
+                    const Icon(
+                      Icons.charging_station_outlined,
+                      color: Colors.grey,
+                    ),
                     const SizedBox(width: 8),
                     const Text(
                       "Perangkat Terhubung",
@@ -136,6 +138,7 @@ class DeviceDialog extends StatelessWidget {
     BluetoothDevice? device,
   ) {
     final isConnected = device != null;
+    final isConnecting = service.isConnecting;
 
     return Container(
       width: double.infinity,
@@ -147,8 +150,16 @@ class DeviceDialog extends StatelessWidget {
       child: Row(
         children: [
           Icon(
-            isConnected ? Icons.bluetooth_connected : Icons.bluetooth,
-            color: isConnected ? Colors.green : Colors.grey,
+            isConnected
+                ? Icons.bluetooth_connected
+                : isConnecting
+                ? Icons.bluetooth_searching
+                : Icons.bluetooth,
+            color: isConnected
+                ? Colors.green
+                : isConnecting
+                ? Colors.orange
+                : Colors.grey,
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -158,13 +169,23 @@ class DeviceDialog extends StatelessWidget {
                 Text(
                   device != null
                       ? service.deviceName(device)
+                      : isConnecting
+                      ? "Menghubungkan..."
                       : "Belum ada perangkat",
                   style: const TextStyle(fontWeight: FontWeight.bold),
                 ),
                 Text(
-                  isConnected ? "• Connected" : "• Disconnected",
+                  isConnected
+                      ? "• Connected"
+                      : isConnecting
+                      ? "• Connecting"
+                      : "• Disconnected",
                   style: TextStyle(
-                    color: isConnected ? Colors.green : Colors.grey,
+                    color: isConnected
+                        ? Colors.green
+                        : isConnecting
+                        ? Colors.orange
+                        : Colors.grey,
                     fontSize: 12,
                   ),
                 ),
