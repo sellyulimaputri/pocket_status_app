@@ -31,6 +31,8 @@ class BleService extends ChangeNotifier {
   String get espWifiSsid => _espWifiSsid;
   String get espWifiIp => _espWifiIp;
   bool get hasEspStatus => _hasEspStatus;
+  String get wifiChangeState => _wifiChangeState;
+  String get wifiChangePrevious => _wifiChangePrevious;
   List<Map<String, dynamic>> get scannedWifiList => _scannedWifiList;
   bool get isEspScanningWifi => _isEspScanningWifi;
 
@@ -43,6 +45,13 @@ class BleService extends ChangeNotifier {
   BluetoothCharacteristic? _dataCharacteristic;
   StreamSubscription<List<int>>? _dataSubscription;
   String _rxBuffer = ""; // penampung JSON yang datang terpotong-potong
+  int? _currentScanId; // id scan Wi-Fi yang sedang berjalan di ESP
+
+  // Hasil percobaan pindah Wi-Fi dari ESP:
+  // sending | connecting | success | failed_restoring | failed_no_previous |
+  // restored | restore_failed | busy
+  String _wifiChangeState = "";
+  String _wifiChangePrevious = "";
   String? _errorMessage;
 
   BluetoothAdapterState get adapterState => _adapterState;
@@ -65,6 +74,8 @@ class BleService extends ChangeNotifier {
     _isEspWifiConnected = false;
     _espWifiSsid = "";
     _espWifiIp = "";
+    _wifiChangeState = "";
+    _wifiChangePrevious = "";
     _scannedWifiList = [];
     _isEspScanningWifi = false;
   }
@@ -346,25 +357,59 @@ class BleService extends ChangeNotifier {
     final event = data['event'];
 
     if (event == 'status') {
-      // Contoh: {"event":"status","status":"connected","ssid":"Biznet","ip":"192.168.1.12"}
-      _isEspWifiConnected = data['status'] == 'connected';
+      // {"event":"status","state":"idle","wifi_connected":true,
+      //  "ssid":"Biznet","ip":"192.168.1.12","scan_id":1}
+      _isEspWifiConnected = data['wifi_connected'] == true;
       _espWifiSsid = (data['ssid'] ?? "").toString();
       _espWifiIp = (data['ip'] ?? "").toString();
       _hasEspStatus = true;
       notifyListeners();
     } else if (event == 'scan_start') {
+      // {"event":"scan_start","scan_id":1}
+      _currentScanId = (data['scan_id'] as num?)?.toInt();
+      _scannedWifiList = [];
       _isEspScanningWifi = true;
       notifyListeners();
-    } else if (event == 'scan_result') {
-      // Contoh: {"event":"scan_result","networks":[{"ssid":"Kosan","rssi":-50,"secure":true}]}
-      final networks = data['networks'];
-      if (networks is List) {
-        _scannedWifiList = networks
-            .whereType<Map>()
-            .map((e) => Map<String, dynamic>.from(e))
-            .toList();
-      }
+    } else if (event == 'wifi_result') {
+      // ESP mengirim satu jaringan per notifikasi:
+      // {"event":"wifi_result","scan_id":1,"index":0,"total":8,
+      //  "ssid":"Kosan","rssi":-50,"channel":6,"security":"WPA2_PSK"}
+      final scanId = (data['scan_id'] as num?)?.toInt();
+      if (_currentScanId != null && scanId != _currentScanId) return;
+
+      final security = (data['security'] ?? "").toString();
+      _scannedWifiList = [
+        ..._scannedWifiList,
+        {
+          'ssid': (data['ssid'] ?? "").toString(),
+          'rssi': data['rssi'],
+          'channel': data['channel'],
+          'secure': security != 'OPEN',
+        },
+      ];
+      notifyListeners();
+    } else if (event == 'scan_complete') {
       _isEspScanningWifi = false;
+      notifyListeners();
+    } else if (event == 'wifi_connecting') {
+      // ESP menerima perintah ganti Wi-Fi dan mulai mencoba.
+      _wifiChangeState = 'connecting';
+      notifyListeners();
+    } else if (event == 'wifi_change') {
+      // {"event":"wifi_change","state":"success","ssid":"Baru","previous_ssid":"Lama"}
+      _wifiChangeState = (data['state'] ?? "").toString();
+      _wifiChangePrevious = (data['previous_ssid'] ?? "").toString();
+      notifyListeners();
+    } else if (event == 'error') {
+      final code = (data['code'] ?? "").toString();
+      _errorMessage =
+          (data['message'] ?? 'ESP error: $code').toString();
+      // Error yang menghentikan scan -> jangan loading terus.
+      if (code == 'scan_failed' ||
+          code == 'scan_start_failed' ||
+          code == 'mtu_too_small') {
+        _isEspScanningWifi = false;
+      }
       notifyListeners();
     }
   }
@@ -463,6 +508,11 @@ class BleService extends ChangeNotifier {
 
   /// Mengirim kredensial Wi-Fi baru ke ESP32
   Future<void> connectEspToWifi(String ssid, String password) async {
+    // Hapus hasil percobaan sebelumnya supaya tidak terbaca sebagai hasil baru.
+    _wifiChangeState = 'sending';
+    _wifiChangePrevious = "";
+    notifyListeners();
+
     // jsonEncode otomatis meng-escape karakter spesial (", \, dll).
     final payload = jsonEncode({
       "action": "set_wifi",

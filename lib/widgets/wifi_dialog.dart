@@ -21,6 +21,7 @@ class _WifiDialogState extends State<WifiDialog> {
   int _scanToken = 0;
 
   String? _connectingSsid; // != null berarti sedang proses menyambungkan
+  String? _restoringTo; // != null berarti sedang kembali ke Wi-Fi lama
   String? _resultMessage;
   bool _resultSuccess = false;
 
@@ -91,39 +92,80 @@ class _WifiDialogState extends State<WifiDialog> {
     await _connectToWifi(ssid, password);
   }
 
+  /// Tunggu sampai ESP melaporkan salah satu dari [states].
+  /// Mengembalikan state-nya, atau '' kalau timeout.
+  Future<String> _waitForWifiChange(Set<String> states, Duration timeout) async {
+    final deadline = DateTime.now().add(timeout);
+    while (mounted && DateTime.now().isBefore(deadline)) {
+      if (states.contains(_ble.wifiChangeState)) return _ble.wifiChangeState;
+      await Future.delayed(const Duration(milliseconds: 300));
+    }
+    return '';
+  }
+
   Future<void> _connectToWifi(String ssid, String password) async {
     setState(() {
       _connectingSsid = ssid;
+      _restoringTo = null;
       _resultMessage = null;
     });
 
     await _ble.connectEspToWifi(ssid, password);
 
-    // Cek status ESP tiap beberapa detik sampai tersambung ke SSID tujuan
-    // (maksimal ±20 detik).
+    // Fase 1: tunggu hasil percobaan Wi-Fi baru dari ESP (ESP maksimal ±15 detik).
+    final outcome = await _waitForWifiChange(
+      const {'success', 'failed_restoring', 'failed_no_previous', 'busy'},
+      const Duration(seconds: 30),
+    );
+
     var success = false;
-    final deadline = DateTime.now().add(const Duration(seconds: 20));
+    String message;
 
-    while (mounted && DateTime.now().isBefore(deadline)) {
-      await Future.delayed(const Duration(seconds: 3));
-      if (!mounted) return;
+    if (outcome == 'success') {
+      success = true;
+      message = 'ESP berhasil pindah ke "$ssid".';
+    } else if (outcome == 'failed_restoring') {
+      // Wi-Fi baru gagal -> ESP sedang kembali ke Wi-Fi lama.
+      final back = _ble.wifiChangePrevious;
+      if (mounted) setState(() => _restoringTo = back);
 
+      // Fase 2: tunggu ESP tersambung lagi ke Wi-Fi lama.
+      final restored = await _waitForWifiChange(
+        const {'restored', 'restore_failed'},
+        const Duration(seconds: 25),
+      );
+
+      message = restored == 'restored'
+          ? 'Gagal terhubung ke "$ssid" (cek password). '
+              'ESP tetap memakai Wi-Fi sebelumnya: "$back".'
+          : 'Gagal terhubung ke "$ssid", dan ESP belum berhasil kembali '
+              'ke "$back". Cek router lalu coba lagi.';
+    } else if (outcome == 'failed_no_previous') {
+      message = 'Gagal terhubung ke "$ssid" (cek password). '
+          'ESP belum punya Wi-Fi sebelumnya.';
+    } else if (outcome == 'busy') {
+      message = 'ESP masih memproses Wi-Fi sebelumnya. Coba lagi sebentar.';
+    } else {
+      // Tidak ada kabar dari ESP (firmware lama / BLE putus): cek status manual.
       await _ble.checkEspStatus();
-      await Future.delayed(const Duration(milliseconds: 800));
-
-      if (_ble.isEspWifiConnected && _ble.espWifiSsid == ssid) {
-        success = true;
-        break;
-      }
+      await Future.delayed(const Duration(seconds: 1));
+      success = _ble.isEspWifiConnected && _ble.espWifiSsid == ssid;
+      message = success
+          ? 'ESP berhasil terhubung ke "$ssid".'
+          : 'ESP tidak membalas. Cek koneksi Bluetooth lalu coba lagi.';
     }
 
     if (!mounted) return;
+
+    // Segarkan kartu status (SSID + IP yang sekarang dipakai ESP).
+    await _ble.checkEspStatus();
+    if (!mounted) return;
+
     setState(() {
       _connectingSsid = null;
+      _restoringTo = null;
       _resultSuccess = success;
-      _resultMessage = success
-          ? 'ESP berhasil terhubung ke "$ssid".'
-          : 'ESP gagal terhubung ke "$ssid". Cek password lalu coba lagi.';
+      _resultMessage = message;
     });
   }
 
@@ -347,7 +389,9 @@ class _WifiDialogState extends State<WifiDialog> {
           const SizedBox(width: 12),
           Expanded(
             child: Text(
-              'Menyambungkan ESP ke "$_connectingSsid"...',
+              _restoringTo != null
+                  ? 'Gagal. Mengembalikan ESP ke "$_restoringTo"...'
+                  : 'Menyambungkan ESP ke "$_connectingSsid"...',
               style: const TextStyle(fontSize: 12),
             ),
           ),
